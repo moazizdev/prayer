@@ -301,15 +301,16 @@ main() {
             ;;
         --time|-t)
             ensure_fresh
-            jq -r '.next_time' "$OUTPUT_FILE"
+            time_24=$(jq -r '.next_time' "$OUTPUT_FILE")
+            date -d "$time_24" +"%I:%M %p"
             ;;
         --all|-a)
             ensure_fresh
-            echo "Fajr:    $(jq -r '.all_prayers.Fajr' "$OUTPUT_FILE")"
-            echo "Dhuhr:   $(jq -r '.all_prayers.Dhuhr' "$OUTPUT_FILE")"
-            echo "Asr:     $(jq -r '.all_prayers.Asr' "$OUTPUT_FILE")"
-            echo "Maghrib: $(jq -r '.all_prayers.Maghrib' "$OUTPUT_FILE")"
-            echo "Isha:    $(jq -r '.all_prayers.Isha' "$OUTPUT_FILE")"
+            echo "Fajr:    $(date -d "$(jq -r '.all_prayers.Fajr' "$OUTPUT_FILE")" +"%I:%M %p")"
+            echo "Dhuhr:   $(date -d "$(jq -r '.all_prayers.Dhuhr' "$OUTPUT_FILE")" +"%I:%M %p")"
+            echo "Asr:     $(date -d "$(jq -r '.all_prayers.Asr' "$OUTPUT_FILE")" +"%I:%M %p")"
+            echo "Maghrib: $(date -d "$(jq -r '.all_prayers.Maghrib' "$OUTPUT_FILE")" +"%I:%M %p")"
+            echo "Isha:    $(date -d "$(jq -r '.all_prayers.Isha' "$OUTPUT_FILE")" +"%I:%M %p")"
             ;;
         --json|-j)
             ensure_fresh
