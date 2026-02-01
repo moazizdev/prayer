@@ -1,0 +1,16 @@
+{
+    "custom/prayer": {
+        "exec": "prayer",
+        "interval": 60,
+        "format": "🕌 {}",
+        "tooltip": true,
+        "exec-on-event": false
+    },
+    
+    "custom/prayer-detailed": {
+        "exec": "echo '{\"text\": \"'$(prayer --name)'\", \"tooltip\": \"'$(prayer --all | tr '\\n' ' ')'\"}'",
+        "return-type": "json",
+        "interval": 60,
+        "format": "🕌 {}"
+    }
+}
