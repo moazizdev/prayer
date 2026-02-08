@@ -1,0 +1,344 @@
+#!/bin/bash
+#
+# Prayer Times CLI
+# https://github.com/yourusername/prayer-times
+#
+
+set -e
+
+VERSION="1.0.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/prayer-times"
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/prayer-times"
+CONFIG="$CONFIG_DIR/config.json"
+API_CACHE="$CACHE_DIR/api_response.json"
+OUTPUT_FILE="$CACHE_DIR/current.json"
+
+#######################################
+# Show help message
+#######################################
+show_help() {
+    cat << EOF
+Prayer Times CLI v${VERSION}
+
+Usage: prayer [COMMAND]
+
+Commands:
+    (none)          Show next prayer and remaining time
+    --update        Fetch from API and update cache
+    --name          Show next prayer name
+    --progress      Show progress percentage (0-100)
+    --remaining     Show remaining time (e.g., "2h 15m")
+    --time          Show next prayer time
+    --all           Show all prayer times for today
+    --json          Show full JSON output
+    --config        Show current configuration
+    --version       Show version
+    --help          Show this help message
+
+Examples:
+    prayer                  # Dhuhr in 2h 15m
+    prayer --name           # Dhuhr
+    prayer --progress       # 45
+    prayer --all            # List all times
+
+Configuration:
+    Edit $CONFIG
+
+EOF
+}
+
+#######################################
+# Show version
+#######################################
+show_version() {
+    echo "prayer-times v${VERSION}"
+}
+
+#######################################
+# Initialize config if not exists
+#######################################
+init_config() {
+    mkdir -p "$CONFIG_DIR"
+    mkdir -p "$CACHE_DIR"
+    
+    if [[ ! -f "$CONFIG" ]]; then
+        cat > "$CONFIG" << 'DEFAULTCONFIG'
+{
+    "city": "Cairo",
+    "country": "Egypt",
+    "method": 5,
+    "fetch_every_minutes": 360
+}
+DEFAULTCONFIG
+        echo "Created default config at $CONFIG"
+        echo "Please edit it with your city and country."
+        exit 0
+    fi
+}
+
+#######################################
+# Read config values
+#######################################
+read_config() {
+    if [[ ! -f "$CONFIG" ]]; then
+        init_config
+    fi
+    
+    CITY=$(jq -r '.city // "Cairo"' "$CONFIG")
+    COUNTRY=$(jq -r '.country // "Egypt"' "$CONFIG")
+    METHOD=$(jq -r '.method // 5' "$CONFIG")
+    FETCH_EVERY=$(jq -r '.fetch_every_minutes // 360' "$CONFIG")
+
+    mkdir -p "$CACHE_DIR"
+}
+
+#######################################
+# Fetch from API if cache is old
+#######################################
+fetch_api() {
+    local needs_refresh=0
+    
+    if [[ ! -f "$API_CACHE" ]]; then
+        needs_refresh=1
+    elif [[ $(find "$API_CACHE" -mmin +${FETCH_EVERY} 2>/dev/null) ]]; then
+        needs_refresh=1
+    fi
+    
+    # Also refresh if date changed
+    if [[ -f "$API_CACHE" ]]; then
+        cached_date=$(jq -r '.data.date.gregorian.date // ""' "$API_CACHE" 2>/dev/null)
+        current_date=$(date +"%d-%m-%Y")
+        if [[ "$cached_date" != "$current_date" ]]; then
+            needs_refresh=1
+        fi
+    fi
+    
+    if [[ $needs_refresh -eq 1 ]]; then
+        current_day=$(date +"%d-%m-%Y")
+        local url="https://api.aladhan.com/v1/timingsByCity/${current_day}?city=${CITY}&country=${COUNTRY}&method=${METHOD}"
+        
+        if curl -s "$url" > "$API_CACHE.tmp"; then
+            if grep -q '"code":200' "$API_CACHE.tmp"; then
+                mv "$API_CACHE.tmp" "$API_CACHE"
+            else
+                rm -f "$API_CACHE.tmp"
+                echo "Error: Failed to fetch prayer times" >&2
+                return 1
+            fi
+        else
+            rm -f "$API_CACHE.tmp"
+            echo "Error: Network request failed" >&2
+            return 1
+        fi
+    fi
+}
+
+#######################################
+# Calculate prayer times and progress
+#######################################
+calculate() {
+    fetch_api || return 1
+    
+    if [[ ! -f "$API_CACHE" ]]; then
+        echo '{"error": "No data available"}' > "$OUTPUT_FILE"
+        return 1
+    fi
+    
+    local now=$(date +%s)
+    local prayers=( "Imsak" "Fajr" "Dhuhr" "Asr" "Maghrib" "Isha" )
+    
+    # Get all prayer times
+    declare -A prayer_times
+    declare -A prayer_times_str
+    for p in "${prayers[@]}"; do
+        local time_str=$(jq -r ".data.timings.$p" "$API_CACHE" 2>/dev/null)
+        prayer_times_str[$p]="$time_str"
+        prayer_times[$p]=$(date +%s -d "$time_str" 2>/dev/null)
+    done
+    
+    # Find next prayer
+    local next_prayer=""
+    local next_time=0
+    local prev_time=0
+    
+    for i in "${!prayers[@]}"; do
+        local prayer="${prayers[$i]}"
+        local prayer_sec=${prayer_times[$prayer]}
+        
+        if [[ $prayer_sec -gt $now ]]; then
+            next_prayer="$prayer"
+            next_time=$prayer_sec
+            
+            if [[ $i -gt 0 ]]; then
+                local prev_prayer="${prayers[$((i-1))]}"
+                prev_time=${prayer_times[$prev_prayer]}
+            else
+                prev_time=$(date +%s -d "00:00")
+            fi
+            break
+        fi
+    done
+    
+    # If no next prayer found, all prayers passed for today
+    if [[ -z "$next_prayer" ]]; then
+        cat > "$OUTPUT_FILE" << EOF
+{
+    "next_prayer": "Fajr",
+    "next_time": "${prayer_times_str[Fajr]}",
+    "remaining_hours": 0,
+    "remaining_mins": 0,
+    "remaining_text": "tomorrow",
+    "progress": 100,
+    "passed": true,
+    "all_prayers": {
+        "Imsak": "${prayer_times_str[Imsak]}",
+        "Fajr": "${prayer_times_str[Fajr]}",
+        "Dhuhr": "${prayer_times_str[Dhuhr]}",
+        "Asr": "${prayer_times_str[Asr]}",
+        "Maghrib": "${prayer_times_str[Maghrib]}",
+        "Isha": "${prayer_times_str[Isha]}"
+    }
+}
+EOF
+        return 0
+    fi
+    
+    # Calculate remaining time
+    local remaining=$((next_time - now))
+    local hours=$((remaining / 3600))
+    local mins=$(((remaining % 3600) / 60))
+    local remaining_text
+    
+    if [[ $hours -gt 0 ]]; then
+        remaining_text="${hours}h ${mins}m"
+    else
+        remaining_text="${mins}m"
+    fi
+    
+    # Calculate progress (counts DOWN: 100% right after prev prayer → 0% as next prayer approaches)
+    local total_interval=$((next_time - prev_time))
+    local elapsed=$((now - prev_time))
+    local progress=0
+    
+    if [[ $total_interval -gt 0 ]]; then
+        progress=$(( (total_interval - elapsed) * 100 / total_interval ))
+    fi
+    
+    # Write output
+    cat > "$OUTPUT_FILE" << EOF
+{
+    "next_prayer": "$next_prayer",
+    "next_time": "${prayer_times_str[$next_prayer]}",
+    "remaining_hours": $hours,
+    "remaining_mins": $mins,
+    "remaining_secs": $remaining,
+    "remaining_text": "$remaining_text",
+    "progress": $progress,
+    "passed": false,
+    "all_prayers": {
+        "Imsak": "${prayer_times_str[Imsak]}",
+        "Fajr": "${prayer_times_str[Fajr]}",
+        "Dhuhr": "${prayer_times_str[Dhuhr]}",
+        "Asr": "${prayer_times_str[Asr]}",
+        "Maghrib": "${prayer_times_str[Maghrib]}",
+        "Isha": "${prayer_times_str[Isha]}"
+    }
+}
+EOF
+}
+
+#######################################
+# Ensure cache is fresh (within 1 min)
+#######################################
+ensure_fresh() {
+    if [[ ! -f "$OUTPUT_FILE" ]]; then
+        calculate
+    elif [[ $(find "$OUTPUT_FILE" -mmin +1 2>/dev/null) ]]; then
+        calculate
+    fi
+}
+
+#######################################
+# Show config
+#######################################
+show_config() {
+    echo "Config file: $CONFIG"
+    echo "Cache dir:   $CACHE_DIR"
+    echo ""
+    if [[ -f "$CONFIG" ]]; then
+        cat "$CONFIG"
+    else
+        echo "No config file found. Run 'prayer' to create default."
+    fi
+}
+
+#######################################
+# Main
+#######################################
+main() {
+    # Check for jq
+    if ! command -v jq &> /dev/null; then
+        echo "Error: jq is required. Install with: sudo apt install jq" >&2
+        exit 1
+    fi
+    
+    read_config
+    
+    case "${1:-}" in
+        --update|-u)
+            calculate
+            echo "Updated successfully"
+            ;;
+        --name|-n)
+            ensure_fresh
+            jq -r '.next_prayer' "$OUTPUT_FILE"
+            ;;
+        --progress|-p)
+            ensure_fresh
+            jq -r '.progress' "$OUTPUT_FILE"
+            ;;
+        --remaining|-r)
+            ensure_fresh
+            jq -r '.remaining_text' "$OUTPUT_FILE"
+            ;;
+        --time|-t)
+            ensure_fresh
+            time_24=$(jq -r '.next_time' "$OUTPUT_FILE")
+            date -d "$time_24" +"%I:%M %p"
+            ;;
+        --all|-a)
+            ensure_fresh
+            local names=("Imsak" "Fajr" "Dhuhr" "Asr" "Maghrib" "Isha")
+            for p in "${names[@]}"; do
+                local t=$(date -d "$(jq -r ".all_prayers.$p" "$OUTPUT_FILE")" +"%I:%M %p")
+                printf "%-8s %s\n" "$p" "$t"
+            done
+            ;;
+        --json|-j)
+            ensure_fresh
+            cat "$OUTPUT_FILE"
+            ;;
+        --config|-c)
+            show_config
+            ;;
+        --version|-v)
+            show_version
+            ;;
+        --help|-h)
+            show_help
+            ;;
+        "")
+            ensure_fresh
+            local prayer=$(jq -r '.next_prayer' "$OUTPUT_FILE")
+            local remaining=$(jq -r '.remaining_text' "$OUTPUT_FILE")
+            echo "$prayer in $remaining"
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            echo "Run 'prayer --help' for usage." >&2
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
